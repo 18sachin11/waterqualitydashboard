@@ -2,6 +2,7 @@
 # Water Quality Dashboard for major ions and trace elements
 # Run: streamlit run app.py
 
+import io
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -9,22 +10,184 @@ import plotly.graph_objects as go
 import streamlit as st
 
 st.set_page_config(
-    page_title="Water Quality Dashboard",
+    page_title="Water Quality Dashboard | WHRC Jammu",
     page_icon="💧",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 DATA_NOT_AVAILABLE = "Data not available"
+DEVELOPER_TEXT = "Website developed by Dr Sachchidanand Singh, Scientist B, Western Himalayan Regional Centre Jammu"
 MISSING_TOKENS = {
     "", " ", "NA", "N/A", "na", "n/a", "Na", "nan", "NaN",
     "-", "--", "nil", "NIL", "None", "none", DATA_NOT_AVAILABLE,
     DATA_NOT_AVAILABLE.lower()
 }
 
+# A clean Plotly template for a softer dashboard look.
+px.defaults.template = "plotly_white"
+px.defaults.color_continuous_scale = "Viridis"
+
+st.markdown(
+    """
+    <style>
+    :root {
+        --primary: #075985;
+        --secondary: #0e7490;
+        --accent: #14b8a6;
+        --soft-bg: #f8fafc;
+        --card: #ffffff;
+        --text: #0f172a;
+        --muted: #64748b;
+        --border: #e2e8f0;
+    }
+
+    .stApp {
+        background: linear-gradient(180deg, #f0f9ff 0%, #f8fafc 35%, #ffffff 100%);
+    }
+
+    [data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #082f49 0%, #0f766e 100%);
+    }
+
+    [data-testid="stSidebar"] * {
+        color: #ffffff !important;
+    }
+
+    [data-testid="stSidebar"] .stSelectbox div,
+    [data-testid="stSidebar"] .stMultiSelect div,
+    [data-testid="stSidebar"] .stTextInput div,
+    [data-testid="stSidebar"] .stNumberInput div,
+    [data-testid="stSidebar"] .stDataFrame div,
+    [data-testid="stSidebar"] [data-baseweb="select"] * {
+        color: #0f172a !important;
+    }
+
+    .hero {
+        padding: 2.3rem 2rem 1.8rem 2rem;
+        border-radius: 28px;
+        background:
+            radial-gradient(circle at top left, rgba(20,184,166,0.30), transparent 28%),
+            linear-gradient(135deg, #075985 0%, #0f766e 58%, #0891b2 100%);
+        color: white;
+        box-shadow: 0 22px 70px rgba(8, 47, 73, 0.20);
+        margin-bottom: 1.2rem;
+        border: 1px solid rgba(255,255,255,0.25);
+    }
+
+    .hero h1 {
+        font-size: 2.45rem;
+        line-height: 1.15;
+        margin: 0 0 0.7rem 0;
+        font-weight: 800;
+        color: #ffffff;
+    }
+
+    .hero p {
+        font-size: 1.05rem;
+        color: rgba(255,255,255,0.93);
+        max-width: 980px;
+        margin-bottom: 0.85rem;
+    }
+
+    .developer-badge {
+        display: inline-block;
+        padding: 0.55rem 0.85rem;
+        background: rgba(255,255,255,0.14);
+        border: 1px solid rgba(255,255,255,0.28);
+        border-radius: 999px;
+        font-weight: 650;
+        color: #ffffff;
+    }
+
+    .upload-card, .info-card, .metric-card, .footer-card {
+        background: rgba(255, 255, 255, 0.94);
+        border: 1px solid var(--border);
+        border-radius: 22px;
+        padding: 1.2rem 1.35rem;
+        box-shadow: 0 14px 40px rgba(15, 23, 42, 0.08);
+    }
+
+    .upload-card {
+        border-left: 7px solid var(--accent);
+        margin-bottom: 1rem;
+    }
+
+    .upload-card h3, .info-card h4 {
+        color: var(--text);
+        margin-top: 0;
+    }
+
+    .upload-card p, .info-card p, .footer-card p {
+        color: var(--muted);
+    }
+
+    .section-title {
+        padding: 0.2rem 0 0.5rem 0;
+        color: #0f172a;
+        font-weight: 800;
+    }
+
+    .metric-card h4 {
+        color: var(--muted);
+        font-size: 0.88rem;
+        margin: 0 0 0.3rem 0;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+    }
+
+    .metric-card h2 {
+        color: var(--primary);
+        margin: 0;
+        font-size: 1.9rem;
+    }
+
+    .stButton > button {
+        border-radius: 999px;
+        min-height: 3rem;
+        font-weight: 750;
+        border: none;
+        box-shadow: 0 12px 28px rgba(14, 116, 144, 0.22);
+    }
+
+    div[data-testid="stMetric"] {
+        background: white;
+        border: 1px solid #e2e8f0;
+        border-radius: 18px;
+        padding: 0.8rem 1rem;
+        box-shadow: 0 10px 28px rgba(15,23,42,0.07);
+    }
+
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+    }
+
+    .stTabs [data-baseweb="tab"] {
+        border-radius: 999px;
+        padding: 0.55rem 1rem;
+        background: #e0f2fe;
+        color: #075985;
+        font-weight: 700;
+    }
+
+    .stTabs [aria-selected="true"] {
+        background: #0e7490 !important;
+        color: white !important;
+    }
+
+    .small-note {
+        color: #64748b;
+        font-size: 0.92rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
 @st.cache_data
 def load_default_data():
     return pd.read_csv("data/wql_jammu_feb2026.csv")
+
 
 def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -51,10 +214,11 @@ def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.rename(columns={c: rename_map.get(c, c) for c in df.columns})
     return df
 
+
 def standardize_missing_values(df: pd.DataFrame) -> pd.DataFrame:
     """Convert blank strings and common missing-value tokens to NaN.
 
-    The app later displays NaN as 'Data not available', but keeps the internal
+    The app displays NaN as 'Data not available', but keeps the internal
     value as NaN so maps, plots, correlations and compliance checks remain valid.
     """
     df = df.copy()
@@ -67,6 +231,7 @@ def standardize_missing_values(df: pd.DataFrame) -> pd.DataFrame:
             )
     return df
 
+
 def to_numeric_safely(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     id_like = {"Sample ID", "Sample Name", "Location", "Trace Location"}
@@ -77,6 +242,7 @@ def to_numeric_safely(df: pd.DataFrame) -> pd.DataFrame:
                 df[c] = converted
     return df
 
+
 def get_numeric_columns(df: pd.DataFrame):
     return [
         c for c in df.columns
@@ -84,16 +250,19 @@ def get_numeric_columns(df: pd.DataFrame):
         and c not in ["Sample No", "Longitude", "Latitude"]
     ]
 
+
 def get_location_column(df: pd.DataFrame):
     for c in ["Sample Name", "Location", "Trace Location"]:
         if c in df.columns:
             return c
     return None
 
+
 def display_value(value):
     if pd.isna(value):
         return DATA_NOT_AVAILABLE
     return value
+
 
 def make_display_df(df: pd.DataFrame) -> pd.DataFrame:
     """Return a display/export copy where blank values are shown explicitly."""
@@ -102,6 +271,7 @@ def make_display_df(df: pd.DataFrame) -> pd.DataFrame:
         display_df[c] = display_df[c].map(display_value)
     return display_df
 
+
 def format_number_or_na(value, digits=3):
     if pd.isna(value):
         return DATA_NOT_AVAILABLE
@@ -109,6 +279,7 @@ def format_number_or_na(value, digits=3):
         return f"{float(value):.{digits}f}"
     except Exception:
         return str(value)
+
 
 def status_from_limits(value, acceptable=None, permissible=None):
     if pd.isna(value):
@@ -124,6 +295,7 @@ def status_from_limits(value, acceptable=None, permissible=None):
         return "Above permissible"
     return "No limit"
 
+
 def limit_for_column(col, limit_table):
     row = limit_table[limit_table["Parameter"] == col]
     if row.empty:
@@ -133,6 +305,7 @@ def limit_for_column(col, limit_table):
     acceptable = None if pd.isna(a) else float(a)
     permissible = None if pd.isna(p) else float(p)
     return acceptable, permissible
+
 
 def build_compliance(df, selected_cols, limit_table):
     loc_col = get_location_column(df)
@@ -172,16 +345,18 @@ def build_compliance(df, selected_cols, limit_table):
 
     return pd.DataFrame(rows)
 
+
 def style_status(val):
     if val == "Above permissible":
-        return "background-color: #ffcccc; color: #7a0000; font-weight: bold"
+        return "background-color: #fee2e2; color: #7f1d1d; font-weight: bold"
     if val == "Between acceptable & permissible":
-        return "background-color: #fff2cc; color: #7a5a00"
+        return "background-color: #fef3c7; color: #78350f"
     if val == "Acceptable":
-        return "background-color: #d9ead3; color: #245c24"
+        return "background-color: #dcfce7; color: #14532d"
     if val == DATA_NOT_AVAILABLE:
-        return "background-color: #eeeeee; color: #555555"
+        return "background-color: #e5e7eb; color: #374151"
     return ""
+
 
 def add_missing_value_note(plot_df, parameter, loc_col_use):
     missing_df = plot_df[pd.isna(plot_df[parameter])]
@@ -191,6 +366,7 @@ def add_missing_value_note(plot_df, parameter, loc_col_use):
                 missing_df[[c for c in ["Sample ID", loc_col_use] if c in missing_df.columns]],
                 use_container_width=True
             )
+
 
 def make_map_figure(map_df, map_param, loc_col_use):
     map_df = map_df.copy()
@@ -203,14 +379,13 @@ def make_map_figure(map_df, map_param, loc_col_use):
     fig = go.Figure()
 
     if not valid_df.empty:
-        # Plotly marker-size scaling requires non-negative values. This keeps even zero values visible.
         vals = valid_df[map_param].astype(float)
         abs_vals = vals.abs()
         positive = abs_vals[abs_vals > 0]
         min_positive = float(positive.min()) if not positive.empty else 1.0
         valid_df["_marker_size_value"] = abs_vals.where(abs_vals > 0, min_positive * 0.25)
 
-        fig_valid = px.scatter_mapbox(
+        fig = px.scatter_mapbox(
             valid_df,
             lat="Latitude",
             lon="Longitude",
@@ -227,7 +402,6 @@ def make_map_figure(map_df, map_param, loc_col_use):
                 "_status": False,
             },
         )
-        fig = fig_valid
 
     if not missing_df.empty:
         fig.add_trace(
@@ -235,7 +409,7 @@ def make_map_figure(map_df, map_param, loc_col_use):
                 lat=missing_df["Latitude"],
                 lon=missing_df["Longitude"],
                 mode="markers",
-                marker=dict(size=14, color="lightgray", opacity=0.85),
+                marker=dict(size=14, color="lightgray", opacity=0.90),
                 name=f"{map_param}: {DATA_NOT_AVAILABLE}",
                 customdata=np.stack([
                     missing_df[loc_col_use].astype(str),
@@ -260,12 +434,88 @@ def make_map_figure(map_df, map_param, loc_col_use):
             "lat": float(map_df["Latitude"].mean()),
             "lon": float(map_df["Longitude"].mean()),
         },
-        height=620,
+        height=640,
         title=f"Spatial distribution of {map_param}",
         margin={"r": 0, "t": 50, "l": 0, "b": 0},
         legend_title_text="Map legend",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
     )
     return fig
+
+
+def load_uploaded_file(uploaded_file):
+    if uploaded_file.name.lower().endswith(".csv"):
+        return pd.read_csv(uploaded_file)
+    return pd.read_excel(uploaded_file)
+
+
+def render_hero():
+    st.markdown(
+        f"""
+        <div class="hero">
+            <h1>💧 Water Quality Analysis & Visualization Dashboard</h1>
+            <p>
+            A web-based dashboard for analysing hydrochemical parameters, trace elements,
+            spatial distribution, missing-data patterns and drinking-water compliance screening.
+            </p>
+            <span class="developer-badge">{DEVELOPER_TEXT}</span>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+def render_landing_cards():
+    a, b, c = st.columns(3)
+    with a:
+        st.markdown(
+            """
+            <div class="info-card">
+                <h4>📊 Parameter analysis</h4>
+                <p>Bar charts, histograms, box plots, summary statistics and missing-value reporting.</p>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    with b:
+        st.markdown(
+            """
+            <div class="info-card">
+                <h4>🗺️ Spatial mapping</h4>
+                <p>Interactive online maps using longitude and latitude. Missing values are shown as grey points.</p>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    with c:
+        st.markdown(
+            """
+            <div class="info-card">
+                <h4>✅ Compliance report</h4>
+                <p>Editable guideline limits, status matrix and downloadable screening summaries.</p>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+
+def render_footer():
+    st.markdown("---")
+    st.markdown(
+        f"""
+        <div class="footer-card">
+            <p><b>{DEVELOPER_TEXT}</b></p>
+            <p class="small-note">
+            Note: This dashboard is for exploratory screening and visualization. Final drinking-water
+            interpretation should use the latest notified standards and laboratory QA/QC validation.
+            Blank values are displayed as <b>{DATA_NOT_AVAILABLE}</b> and are not treated as zero.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
 
 # Major ions are assumed to be in mg/L.
 # Trace elements are assumed to be in ppb/µg/L.
@@ -290,29 +540,105 @@ DEFAULT_LIMITS = pd.DataFrame([
     ["Se_ppb", "ppb", 10.0, 10.0, "Trace elements"],
 ], columns=["Parameter", "Unit", "Acceptable", "Permissible", "Group"])
 
-st.sidebar.title("💧 Water Quality Dashboard")
-st.sidebar.caption("Major ions + trace elements analysis")
 
-uploaded_file = st.sidebar.file_uploader(
-    "Upload combined CSV/XLSX dataset",
-    type=["csv", "xlsx"],
-    help="Recommended columns: Sample ID, Sample Name, Longitude, Latitude, Fluoride, Nitrate, Fe_ppb, As_ppb, etc."
+# -----------------------------
+# Landing and upload workflow
+# -----------------------------
+render_hero()
+
+st.markdown(
+    f"""
+    <div class="upload-card">
+        <h3>Start here</h3>
+        <p>
+        Please upload the water-quality data file first. After uploading the file, click
+        <b>Generate Report</b> to display all visualizations, maps, statistical summaries,
+        correlation analysis, compliance screening and export options.
+        </p>
+        <p class="small-note">
+        Recommended format: CSV or Excel file with columns such as Sample ID, Sample Name,
+        Longitude, Latitude, Fluoride, Nitrate, Sulfate, Fe_ppb, Mn_ppb, As_ppb and Pb_ppb.
+        Blank parameter values will be displayed as <b>{DATA_NOT_AVAILABLE}</b>.
+        </p>
+    </div>
+    """,
+    unsafe_allow_html=True
 )
 
-if uploaded_file is not None:
-    if uploaded_file.name.lower().endswith(".csv"):
-        df = pd.read_csv(uploaded_file)
-    else:
-        df = pd.read_excel(uploaded_file)
-else:
-    df = load_default_data()
+upload_col, action_col = st.columns([2.5, 1])
+with upload_col:
+    uploaded_file = st.file_uploader(
+        "Upload data file",
+        type=["csv", "xlsx"],
+        label_visibility="collapsed",
+        help="Upload a combined major-ion and trace-element dataset in CSV or Excel format."
+    )
+with action_col:
+    st.write("")
+    generate_clicked = st.button("🚀 Generate Report", type="primary", use_container_width=True)
 
-df = clean_columns(df)
+with st.expander("Use sample dataset for testing", expanded=False):
+    use_demo = st.checkbox(
+        "Use bundled sample dataset if no file is uploaded",
+        value=False,
+        help="This option is useful for testing the website before uploading a new dataset."
+    )
+
+if "report_generated" not in st.session_state:
+    st.session_state.report_generated = False
+if "file_signature" not in st.session_state:
+    st.session_state.file_signature = None
+
+current_signature = None
+if uploaded_file is not None:
+    current_signature = f"{uploaded_file.name}_{uploaded_file.size}"
+elif use_demo:
+    current_signature = "bundled_demo_dataset"
+
+if current_signature != st.session_state.file_signature:
+    st.session_state.report_generated = False
+    st.session_state.file_signature = current_signature
+
+if generate_clicked:
+    if uploaded_file is None and not use_demo:
+        st.error("Please upload a CSV/XLSX data file first, then click Generate Report.")
+    else:
+        st.session_state.report_generated = True
+
+if not st.session_state.report_generated:
+    render_landing_cards()
+    render_footer()
+    st.stop()
+
+# -----------------------------
+# Load and prepare data
+# -----------------------------
+try:
+    if uploaded_file is not None:
+        raw_df = load_uploaded_file(uploaded_file)
+        data_source_label = uploaded_file.name
+    else:
+        raw_df = load_default_data()
+        data_source_label = "Bundled sample dataset"
+except Exception as exc:
+    st.error(f"Could not read the uploaded file: {exc}")
+    st.stop()
+
+if raw_df.empty:
+    st.error("The uploaded dataset is empty. Please upload a valid water-quality dataset.")
+    st.stop()
+
+df = clean_columns(raw_df)
 df = standardize_missing_values(df)
 df = to_numeric_safely(df)
 
 loc_col = get_location_column(df)
 numeric_cols = get_numeric_columns(df)
+
+st.sidebar.markdown("# 💧 Dashboard Controls")
+st.sidebar.markdown(DEVELOPER_TEXT)
+st.sidebar.markdown("---")
+st.sidebar.success(f"Report generated for: {data_source_label}")
 
 with st.sidebar.expander("Filter samples", expanded=True):
     if loc_col:
@@ -338,7 +664,7 @@ with st.sidebar.expander("Filter samples", expanded=True):
     )
 
 with st.sidebar.expander("Editable standards / limits", expanded=False):
-    st.caption("Values are editable. Use local BIS/WHO/project-specific limits as required.")
+    st.caption("Values are editable. Use BIS/WHO/project-specific limits as required.")
     limit_table = st.data_editor(
         DEFAULT_LIMITS,
         num_rows="dynamic",
@@ -346,11 +672,9 @@ with st.sidebar.expander("Editable standards / limits", expanded=False):
         key="limits_editor"
     )
 
-st.title("Water Quality Analysis & Visualization Dashboard")
-st.markdown(
-    "This dashboard supports exploratory analysis, spatial visualization, parameter-wise comparison, "
-    "correlation analysis, and compliance screening for water-quality samples. Blank cells are shown as "
-    f"**{DATA_NOT_AVAILABLE}** while the app keeps them internally as missing numeric values for safe plotting."
+st.markdown("<h2 class='section-title'>Generated Water Quality Report</h2>", unsafe_allow_html=True)
+st.caption(
+    f"Data source: {data_source_label}. Blank cells are displayed as '{DATA_NOT_AVAILABLE}' and are kept internally as missing values."
 )
 
 c1, c2, c3, c4, c5 = st.columns(5)
@@ -431,7 +755,7 @@ with tab2:
                     fig.add_hline(y=acceptable, line_dash="dash", annotation_text="Acceptable limit")
                 if permissible is not None and permissible != acceptable:
                     fig.add_hline(y=permissible, line_dash="dot", annotation_text="Permissible limit")
-                fig.update_layout(xaxis_tickangle=-35, height=520)
+                fig.update_layout(xaxis_tickangle=-35, height=520, paper_bgcolor="rgba(0,0,0,0)")
                 st.plotly_chart(fig, use_container_width=True)
 
         with col_b:
@@ -463,7 +787,7 @@ with tab2:
                     title=f"Histogram: {parameter}",
                     labels={parameter: f"{parameter} ({unit})" if unit else parameter}
                 )
-                fig_hist.update_layout(height=420)
+                fig_hist.update_layout(height=420, paper_bgcolor="rgba(0,0,0,0)")
                 st.plotly_chart(fig_hist, use_container_width=True)
 
         with col_box:
@@ -478,7 +802,7 @@ with tab2:
                     title=f"Box plot: {parameter}",
                     labels={parameter: f"{parameter} ({unit})" if unit else parameter}
                 )
-                fig_box.update_layout(height=420)
+                fig_box.update_layout(height=420, paper_bgcolor="rgba(0,0,0,0)")
                 st.plotly_chart(fig_box, use_container_width=True)
 
 with tab3:
@@ -533,7 +857,7 @@ with tab4:
             aspect="auto",
             title="Pearson correlation matrix"
         )
-        fig_corr.update_layout(height=700)
+        fig_corr.update_layout(height=700, paper_bgcolor="rgba(0,0,0,0)")
         st.plotly_chart(fig_corr, use_container_width=True)
 
         xcol, ycol = st.columns(2)
@@ -557,7 +881,7 @@ with tab4:
                 hover_name=loc_col if loc_col else None,
                 title=f"{x_param} vs {y_param}"
             )
-            fig_sc.update_layout(height=500)
+            fig_sc.update_layout(height=500, paper_bgcolor="rgba(0,0,0,0)")
             st.plotly_chart(fig_sc, use_container_width=True)
 
 with tab5:
@@ -586,7 +910,7 @@ with tab5:
                 "variable": "Status"
             }
         )
-        fig_score.update_layout(xaxis_tickangle=-35, height=500)
+        fig_score.update_layout(xaxis_tickangle=-35, height=500, paper_bgcolor="rgba(0,0,0,0)")
         st.plotly_chart(fig_score, use_container_width=True)
 
         status_matrix = pd.DataFrame()
@@ -643,8 +967,4 @@ with tab6:
         mime="text/csv"
     )
 
-st.markdown("---")
-st.caption(
-    "Note: This dashboard is for exploratory screening and visualization. "
-    "Final drinking-water interpretation should use the latest notified standards and laboratory QA/QC validation."
-)
+render_footer()
