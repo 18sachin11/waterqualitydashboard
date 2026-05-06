@@ -5,6 +5,7 @@
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 st.set_page_config(
@@ -13,6 +14,13 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+DATA_NOT_AVAILABLE = "Data not available"
+MISSING_TOKENS = {
+    "", " ", "NA", "N/A", "na", "n/a", "Na", "nan", "NaN",
+    "-", "--", "nil", "NIL", "None", "none", DATA_NOT_AVAILABLE,
+    DATA_NOT_AVAILABLE.lower()
+}
 
 @st.cache_data
 def load_default_data():
@@ -43,6 +51,22 @@ def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.rename(columns={c: rename_map.get(c, c) for c in df.columns})
     return df
 
+def standardize_missing_values(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert blank strings and common missing-value tokens to NaN.
+
+    The app later displays NaN as 'Data not available', but keeps the internal
+    value as NaN so maps, plots, correlations and compliance checks remain valid.
+    """
+    df = df.copy()
+    for c in df.columns:
+        if pd.api.types.is_object_dtype(df[c]) or pd.api.types.is_string_dtype(df[c]):
+            df[c] = df[c].apply(
+                lambda x: np.nan
+                if pd.isna(x) or str(x).strip() in MISSING_TOKENS
+                else str(x).strip()
+            )
+    return df
+
 def to_numeric_safely(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     id_like = {"Sample ID", "Sample Name", "Location", "Trace Location"}
@@ -66,9 +90,29 @@ def get_location_column(df: pd.DataFrame):
             return c
     return None
 
+def display_value(value):
+    if pd.isna(value):
+        return DATA_NOT_AVAILABLE
+    return value
+
+def make_display_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a display/export copy where blank values are shown explicitly."""
+    display_df = df.copy()
+    for c in display_df.columns:
+        display_df[c] = display_df[c].map(display_value)
+    return display_df
+
+def format_number_or_na(value, digits=3):
+    if pd.isna(value):
+        return DATA_NOT_AVAILABLE
+    try:
+        return f"{float(value):.{digits}f}"
+    except Exception:
+        return str(value)
+
 def status_from_limits(value, acceptable=None, permissible=None):
     if pd.isna(value):
-        return "No data"
+        return DATA_NOT_AVAILABLE
     if acceptable is None and permissible is None:
         return "No limit"
     if acceptable is not None and value <= acceptable:
@@ -107,7 +151,7 @@ def build_compliance(df, selected_cols, limit_table):
             a, p = limit_for_column(col, limit_table)
             status = status_from_limits(r[col], a, p)
 
-            if status == "No data":
+            if status == DATA_NOT_AVAILABLE:
                 no_data += 1
             elif status == "Above permissible":
                 above += 1
@@ -122,7 +166,7 @@ def build_compliance(df, selected_cols, limit_table):
             "Acceptable": acceptable_n,
             "Between acceptable & permissible": between,
             "Above permissible": above,
-            "No data": no_data,
+            DATA_NOT_AVAILABLE: no_data,
             "Exceedance Score": above * 2 + between
         })
 
@@ -135,7 +179,93 @@ def style_status(val):
         return "background-color: #fff2cc; color: #7a5a00"
     if val == "Acceptable":
         return "background-color: #d9ead3; color: #245c24"
+    if val == DATA_NOT_AVAILABLE:
+        return "background-color: #eeeeee; color: #555555"
     return ""
+
+def add_missing_value_note(plot_df, parameter, loc_col_use):
+    missing_df = plot_df[pd.isna(plot_df[parameter])]
+    if not missing_df.empty:
+        with st.expander(f"Samples where {parameter} is {DATA_NOT_AVAILABLE}"):
+            st.dataframe(
+                missing_df[[c for c in ["Sample ID", loc_col_use] if c in missing_df.columns]],
+                use_container_width=True
+            )
+
+def make_map_figure(map_df, map_param, loc_col_use):
+    map_df = map_df.copy()
+    map_df["_value_label"] = map_df[map_param].apply(lambda x: format_number_or_na(x, 3))
+    map_df["_status"] = np.where(map_df[map_param].notna(), "Value available", DATA_NOT_AVAILABLE)
+
+    valid_df = map_df[map_df[map_param].notna()].copy()
+    missing_df = map_df[map_df[map_param].isna()].copy()
+
+    fig = go.Figure()
+
+    if not valid_df.empty:
+        # Plotly marker-size scaling requires non-negative values. This keeps even zero values visible.
+        vals = valid_df[map_param].astype(float)
+        abs_vals = vals.abs()
+        positive = abs_vals[abs_vals > 0]
+        min_positive = float(positive.min()) if not positive.empty else 1.0
+        valid_df["_marker_size_value"] = abs_vals.where(abs_vals > 0, min_positive * 0.25)
+
+        fig_valid = px.scatter_mapbox(
+            valid_df,
+            lat="Latitude",
+            lon="Longitude",
+            color=map_param,
+            size="_marker_size_value",
+            size_max=24,
+            hover_name=loc_col_use,
+            hover_data={
+                "Latitude": ":.4f",
+                "Longitude": ":.4f",
+                map_param: ":.3f",
+                "_marker_size_value": False,
+                "_value_label": False,
+                "_status": False,
+            },
+        )
+        fig = fig_valid
+
+    if not missing_df.empty:
+        fig.add_trace(
+            go.Scattermapbox(
+                lat=missing_df["Latitude"],
+                lon=missing_df["Longitude"],
+                mode="markers",
+                marker=dict(size=14, color="lightgray", opacity=0.85),
+                name=f"{map_param}: {DATA_NOT_AVAILABLE}",
+                customdata=np.stack([
+                    missing_df[loc_col_use].astype(str),
+                    missing_df["Latitude"].round(4).astype(str),
+                    missing_df["Longitude"].round(4).astype(str),
+                    missing_df["_value_label"].astype(str),
+                ], axis=-1),
+                hovertemplate=(
+                    "<b>%{customdata[0]}</b><br>"
+                    "Latitude: %{customdata[1]}<br>"
+                    "Longitude: %{customdata[2]}<br>"
+                    f"{map_param}: %{{customdata[3]}}"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    fig.update_layout(
+        mapbox_style="open-street-map",
+        mapbox_zoom=10,
+        mapbox_center={
+            "lat": float(map_df["Latitude"].mean()),
+            "lon": float(map_df["Longitude"].mean()),
+        },
+        height=620,
+        title=f"Spatial distribution of {map_param}",
+        margin={"r": 0, "t": 50, "l": 0, "b": 0},
+        legend_title_text="Map legend",
+    )
+    return fig
 
 # Major ions are assumed to be in mg/L.
 # Trace elements are assumed to be in ppb/µg/L.
@@ -178,6 +308,7 @@ else:
     df = load_default_data()
 
 df = clean_columns(df)
+df = standardize_missing_values(df)
 df = to_numeric_safely(df)
 
 loc_col = get_location_column(df)
@@ -218,10 +349,11 @@ with st.sidebar.expander("Editable standards / limits", expanded=False):
 st.title("Water Quality Analysis & Visualization Dashboard")
 st.markdown(
     "This dashboard supports exploratory analysis, spatial visualization, parameter-wise comparison, "
-    "correlation analysis, and compliance screening for water-quality samples."
+    "correlation analysis, and compliance screening for water-quality samples. Blank cells are shown as "
+    f"**{DATA_NOT_AVAILABLE}** while the app keeps them internally as missing numeric values for safe plotting."
 )
 
-c1, c2, c3, c4 = st.columns(4)
+c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("Samples", len(df))
 c2.metric("Numeric parameters", len(numeric_cols))
 
@@ -233,8 +365,10 @@ else:
 if selected_params:
     comp_tmp = build_compliance(df, selected_params, limit_table)
     c4.metric("Samples above permissible", int((comp_tmp["Above permissible"] > 0).sum()))
+    c5.metric(DATA_NOT_AVAILABLE, int(df[selected_params].isna().sum().sum()))
 else:
     c4.metric("Samples above permissible", "N/A")
+    c5.metric(DATA_NOT_AVAILABLE, "N/A")
 
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "📄 Data",
@@ -247,7 +381,7 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
 
 with tab1:
     st.subheader("Dataset preview")
-    st.dataframe(df, use_container_width=True, height=380)
+    st.dataframe(make_display_df(df), use_container_width=True, height=380)
 
     st.subheader("Summary statistics")
     if numeric_cols:
@@ -278,30 +412,34 @@ with tab2:
         col_a, col_b = st.columns([2, 1])
 
         with col_a:
-            fig = px.bar(
-                plot_df.sort_values(parameter, ascending=False),
-                x=loc_col_use,
-                y=parameter,
-                text=parameter,
-                title=f"{parameter} concentration by sample",
-                labels={
-                    parameter: f"{parameter} ({unit})" if unit else parameter,
-                    loc_col_use: "Location"
-                }
-            )
-            fig.update_traces(texttemplate="%{text:.2f}", textposition="outside")
-            if acceptable is not None:
-                fig.add_hline(y=acceptable, line_dash="dash", annotation_text="Acceptable limit")
-            if permissible is not None and permissible != acceptable:
-                fig.add_hline(y=permissible, line_dash="dot", annotation_text="Permissible limit")
-            fig.update_layout(xaxis_tickangle=-35, height=520)
-            st.plotly_chart(fig, use_container_width=True)
+            if plot_df[parameter].dropna().empty:
+                st.info(f"No numeric values are available for {parameter}. All selected samples are marked as {DATA_NOT_AVAILABLE}.")
+            else:
+                fig = px.bar(
+                    plot_df.sort_values(parameter, ascending=False, na_position="last"),
+                    x=loc_col_use,
+                    y=parameter,
+                    text=parameter,
+                    title=f"{parameter} concentration by sample",
+                    labels={
+                        parameter: f"{parameter} ({unit})" if unit else parameter,
+                        loc_col_use: "Location"
+                    }
+                )
+                fig.update_traces(texttemplate="%{text:.2f}", textposition="outside")
+                if acceptable is not None:
+                    fig.add_hline(y=acceptable, line_dash="dash", annotation_text="Acceptable limit")
+                if permissible is not None and permissible != acceptable:
+                    fig.add_hline(y=permissible, line_dash="dot", annotation_text="Permissible limit")
+                fig.update_layout(xaxis_tickangle=-35, height=520)
+                st.plotly_chart(fig, use_container_width=True)
 
         with col_b:
             values = plot_df[parameter].dropna()
-            st.metric("Minimum", f"{values.min():.3f}" if not values.empty else "N/A")
-            st.metric("Mean", f"{values.mean():.3f}" if not values.empty else "N/A")
-            st.metric("Maximum", f"{values.max():.3f}" if not values.empty else "N/A")
+            st.metric("Minimum", f"{values.min():.3f}" if not values.empty else DATA_NOT_AVAILABLE)
+            st.metric("Mean", f"{values.mean():.3f}" if not values.empty else DATA_NOT_AVAILABLE)
+            st.metric("Maximum", f"{values.max():.3f}" if not values.empty else DATA_NOT_AVAILABLE)
+            st.metric(DATA_NOT_AVAILABLE, int(plot_df[parameter].isna().sum()))
 
             if acceptable is not None or permissible is not None:
                 status_counts = plot_df[parameter].apply(
@@ -310,30 +448,38 @@ with tab2:
                 st.write("Status count")
                 st.dataframe(status_counts.rename("count"), use_container_width=True)
 
+        add_missing_value_note(plot_df, parameter, loc_col_use)
+
         col_h, col_box = st.columns(2)
 
         with col_h:
-            fig_hist = px.histogram(
-                plot_df,
-                x=parameter,
-                nbins=10,
-                title=f"Histogram: {parameter}",
-                labels={parameter: f"{parameter} ({unit})" if unit else parameter}
-            )
-            fig_hist.update_layout(height=420)
-            st.plotly_chart(fig_hist, use_container_width=True)
+            if plot_df[parameter].dropna().empty:
+                st.info(f"Histogram cannot be generated for {parameter} because all values are {DATA_NOT_AVAILABLE}.")
+            else:
+                fig_hist = px.histogram(
+                    plot_df,
+                    x=parameter,
+                    nbins=10,
+                    title=f"Histogram: {parameter}",
+                    labels={parameter: f"{parameter} ({unit})" if unit else parameter}
+                )
+                fig_hist.update_layout(height=420)
+                st.plotly_chart(fig_hist, use_container_width=True)
 
         with col_box:
-            fig_box = px.box(
-                plot_df,
-                y=parameter,
-                points="all",
-                hover_data=[loc_col_use],
-                title=f"Box plot: {parameter}",
-                labels={parameter: f"{parameter} ({unit})" if unit else parameter}
-            )
-            fig_box.update_layout(height=420)
-            st.plotly_chart(fig_box, use_container_width=True)
+            if plot_df[parameter].dropna().empty:
+                st.info(f"Box plot cannot be generated for {parameter} because all values are {DATA_NOT_AVAILABLE}.")
+            else:
+                fig_box = px.box(
+                    plot_df,
+                    y=parameter,
+                    points="all",
+                    hover_data=[loc_col_use],
+                    title=f"Box plot: {parameter}",
+                    labels={parameter: f"{parameter} ({unit})" if unit else parameter}
+                )
+                fig_box.update_layout(height=420)
+                st.plotly_chart(fig_box, use_container_width=True)
 
 with tab3:
     st.subheader("Spatial visualization")
@@ -346,33 +492,28 @@ with tab3:
         map_param = st.selectbox("Parameter for map colour/size", selected_params, key="map_param")
         map_df = df.dropna(subset=["Longitude", "Latitude"]).copy()
 
-        if loc_col is None:
-            map_df["Location"] = map_df.index.astype(str)
-            loc_col_use = "Location"
+        if map_df.empty:
+            st.warning("No samples have valid Longitude and Latitude values.")
         else:
-            loc_col_use = loc_col
+            if loc_col is None:
+                map_df["Location"] = map_df.index.astype(str)
+                loc_col_use = "Location"
+            else:
+                loc_col_use = loc_col
 
-        fig_map = px.scatter_mapbox(
-            map_df,
-            lat="Latitude",
-            lon="Longitude",
-            color=map_param,
-            size=map_param,
-            size_max=22,
-            hover_name=loc_col_use,
-            hover_data={
-                "Latitude": ":.4f",
-                "Longitude": ":.4f",
-                map_param: ":.3f"
-            },
-            zoom=10,
-            height=620,
-            title=f"Spatial distribution of {map_param}",
-            mapbox_style="open-street-map"
-        )
-        st.plotly_chart(fig_map, use_container_width=True)
+            fig_map = make_map_figure(map_df, map_param, loc_col_use)
+            st.plotly_chart(fig_map, use_container_width=True)
 
-        st.caption("Tip: use the lasso/box tools in the Plotly toolbar to inspect clusters interactively.")
+            st.caption(
+                f"Grey markers indicate samples where {map_param} is {DATA_NOT_AVAILABLE}. "
+                "These locations are still mapped so every parameter can be visualized spatially."
+            )
+
+            missing_map_df = map_df[pd.isna(map_df[map_param])]
+            if not missing_map_df.empty:
+                with st.expander(f"Mapped samples where {map_param} is {DATA_NOT_AVAILABLE}"):
+                    cols_to_show = [c for c in ["Sample ID", loc_col_use, "Latitude", "Longitude"] if c in missing_map_df.columns]
+                    st.dataframe(make_display_df(missing_map_df[cols_to_show]), use_container_width=True)
 
 with tab4:
     st.subheader("Correlation analysis")
@@ -385,7 +526,7 @@ with tab4:
     if len(corr_cols) < 2:
         st.info("Select at least two numeric parameters.")
     else:
-        corr = df[corr_cols].corr(method="pearson")
+        corr = df[corr_cols].corr(method="pearson", min_periods=2)
         fig_corr = px.imshow(
             corr,
             text_auto=".2f",
@@ -401,22 +542,30 @@ with tab4:
         with ycol:
             y_param = st.selectbox("Y parameter", corr_cols, index=1 if len(corr_cols) > 1 else 0)
 
-        fig_sc = px.scatter(
-            df,
-            x=x_param,
-            y=y_param,
-            trendline="ols",
-            hover_name=loc_col if loc_col else None,
-            title=f"{x_param} vs {y_param}"
-        )
-        fig_sc.update_layout(height=500)
-        st.plotly_chart(fig_sc, use_container_width=True)
+        scatter_df = df.dropna(subset=[x_param, y_param]).copy()
+        if len(scatter_df) < 2:
+            st.info(
+                f"Scatter plot needs at least two samples with data for both {x_param} and {y_param}. "
+                f"Missing values are shown as {DATA_NOT_AVAILABLE} in the data table."
+            )
+        else:
+            fig_sc = px.scatter(
+                scatter_df,
+                x=x_param,
+                y=y_param,
+                trendline="ols" if len(scatter_df) >= 3 else None,
+                hover_name=loc_col if loc_col else None,
+                title=f"{x_param} vs {y_param}"
+            )
+            fig_sc.update_layout(height=500)
+            st.plotly_chart(fig_sc, use_container_width=True)
 
 with tab5:
     st.subheader("Compliance screening")
     st.caption(
         "Status is computed using the editable limit table in the sidebar. "
-        "For trace elements, columns ending in _ppb are compared against ppb/µg/L limits."
+        "For trace elements, columns ending in _ppb are compared against ppb/µg/L limits. "
+        f"Blank values are treated as {DATA_NOT_AVAILABLE}, not as zero."
     )
 
     if not selected_params:
@@ -429,8 +578,8 @@ with tab5:
         fig_score = px.bar(
             comp,
             x="Location",
-            y=["Above permissible", "Between acceptable & permissible"],
-            title="Compliance exceedance count by sample",
+            y=["Above permissible", "Between acceptable & permissible", DATA_NOT_AVAILABLE],
+            title="Compliance and missing-data count by sample",
             labels={
                 "value": "Number of parameters",
                 "Location": "Location",
@@ -460,11 +609,19 @@ with tab5:
 with tab6:
     st.subheader("Export processed outputs")
 
-    csv = df.to_csv(index=False).encode("utf-8")
+    csv_numeric = df.to_csv(index=False).encode("utf-8")
     st.download_button(
-        "Download filtered dataset as CSV",
-        data=csv,
-        file_name="filtered_water_quality_data.csv",
+        "Download analysis-ready dataset as CSV",
+        data=csv_numeric,
+        file_name="filtered_water_quality_data_numeric_missing_as_blank.csv",
+        mime="text/csv"
+    )
+
+    csv_display = make_display_df(df).to_csv(index=False).encode("utf-8")
+    st.download_button(
+        f"Download display dataset with '{DATA_NOT_AVAILABLE}' as CSV",
+        data=csv_display,
+        file_name="filtered_water_quality_data_with_data_not_available.csv",
         mime="text/csv"
     )
 
