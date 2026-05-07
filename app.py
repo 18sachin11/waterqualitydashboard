@@ -3,11 +3,28 @@
 # Run: streamlit run app.py
 
 import io
+import tempfile
+from datetime import datetime
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.platypus import (
+    Image,
+    PageBreak,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
 
 st.set_page_config(
     page_title="Water Quality Dashboard | WHRC Jammu",
@@ -442,6 +459,403 @@ def make_map_figure(map_df, map_param, loc_col_use):
         plot_bgcolor="rgba(0,0,0,0)",
     )
     return fig
+
+
+
+def _pdf_cell(value, max_chars=42):
+    """Return compact text for ReportLab table cells."""
+    if pd.isna(value):
+        return DATA_NOT_AVAILABLE
+    txt = str(value)
+    return txt if len(txt) <= max_chars else txt[: max_chars - 3] + "..."
+
+
+def _pdf_table(data, col_widths=None, font_size=7.2, header_bg="#075985"):
+    table = Table(data, colWidths=col_widths, repeatRows=1, hAlign="LEFT")
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(header_bg)),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+                ("FONTSIZE", (0, 0), (-1, -1), font_size),
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#CBD5E1")),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F8FAFC")]),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ]
+        )
+    )
+    return table
+
+
+def _save_bar_chart(df, parameter, loc_col_use, acceptable, permissible, unit, out_path):
+    plot_df = df.copy()
+    labels = plot_df[loc_col_use].astype(str).tolist()
+    values = plot_df[parameter]
+
+    fig, ax = plt.subplots(figsize=(9, 4.8))
+    x = np.arange(len(plot_df))
+    ax.bar(x, values.fillna(0))
+    if values.isna().any():
+        for xi, yi, is_missing in zip(x, values.fillna(0), values.isna()):
+            if is_missing:
+                ax.text(xi, max(float(values.max(skipna=True) or 1) * 0.03, 0.01), "NA", ha="center", va="bottom", fontsize=8)
+    if acceptable is not None:
+        ax.axhline(acceptable, linestyle="--", linewidth=1, label="Acceptable limit")
+    if permissible is not None and permissible != acceptable:
+        ax.axhline(permissible, linestyle=":", linewidth=1, label="Permissible limit")
+    ax.set_title(f"{parameter} concentration by sample")
+    ax.set_ylabel(f"{parameter} ({unit})" if unit else parameter)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=8)
+    if acceptable is not None or permissible is not None:
+        ax.legend(fontsize=8)
+    ax.grid(axis="y", alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _save_histogram(df, parameter, unit, out_path):
+    values = df[parameter].dropna()
+    fig, ax = plt.subplots(figsize=(7, 3.8))
+    if values.empty:
+        ax.text(0.5, 0.5, f"No numeric values available for {parameter}", ha="center", va="center")
+        ax.set_axis_off()
+    else:
+        ax.hist(values, bins=min(10, max(3, len(values))))
+        ax.set_title(f"Distribution of {parameter}")
+        ax.set_xlabel(f"{parameter} ({unit})" if unit else parameter)
+        ax.set_ylabel("Frequency")
+        ax.grid(axis="y", alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _save_spatial_chart(df, parameter, loc_col_use, out_path):
+    fig, ax = plt.subplots(figsize=(7.2, 5.2))
+    if "Longitude" not in df.columns or "Latitude" not in df.columns:
+        ax.text(0.5, 0.5, "Longitude and Latitude columns not available", ha="center", va="center")
+        ax.set_axis_off()
+    else:
+        map_df = df.dropna(subset=["Longitude", "Latitude"]).copy()
+        if map_df.empty:
+            ax.text(0.5, 0.5, "No valid coordinates available", ha="center", va="center")
+            ax.set_axis_off()
+        else:
+            valid = map_df[map_df[parameter].notna()]
+            missing = map_df[map_df[parameter].isna()]
+            if not valid.empty:
+                sc = ax.scatter(valid["Longitude"], valid["Latitude"], c=valid[parameter], s=90, alpha=0.85)
+                fig.colorbar(sc, ax=ax, label=parameter)
+            if not missing.empty:
+                ax.scatter(missing["Longitude"], missing["Latitude"], marker="x", s=80, label=DATA_NOT_AVAILABLE)
+            for _, row in map_df.iterrows():
+                ax.annotate(str(row[loc_col_use])[:14], (row["Longitude"], row["Latitude"]), fontsize=7, xytext=(3, 3), textcoords="offset points")
+            ax.set_title(f"Spatial distribution of {parameter}")
+            ax.set_xlabel("Longitude")
+            ax.set_ylabel("Latitude")
+            ax.grid(alpha=0.25)
+            if not missing.empty:
+                ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _save_correlation_heatmap(df, corr_cols, out_path):
+    corr = df[corr_cols].corr(method="pearson", min_periods=2)
+    fig, ax = plt.subplots(figsize=(8.2, 6.2))
+    if corr.empty or corr.isna().all().all():
+        ax.text(0.5, 0.5, "Correlation matrix could not be generated", ha="center", va="center")
+        ax.set_axis_off()
+    else:
+        im = ax.imshow(corr, vmin=-1, vmax=1)
+        ax.set_xticks(np.arange(len(corr.columns)))
+        ax.set_yticks(np.arange(len(corr.index)))
+        ax.set_xticklabels(corr.columns, rotation=45, ha="right", fontsize=7)
+        ax.set_yticklabels(corr.index, fontsize=7)
+        for i in range(len(corr.index)):
+            for j in range(len(corr.columns)):
+                val = corr.iloc[i, j]
+                ax.text(j, i, "NA" if pd.isna(val) else f"{val:.2f}", ha="center", va="center", fontsize=6)
+        ax.set_title("Pearson correlation matrix")
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _save_compliance_chart(comp_df, out_path):
+    fig, ax = plt.subplots(figsize=(8.8, 4.8))
+    if comp_df.empty:
+        ax.text(0.5, 0.5, "Compliance summary not available", ha="center", va="center")
+        ax.set_axis_off()
+    else:
+        x = np.arange(len(comp_df))
+        above = comp_df["Above permissible"].to_numpy()
+        between = comp_df["Between acceptable & permissible"].to_numpy()
+        missing = comp_df[DATA_NOT_AVAILABLE].to_numpy()
+        ax.bar(x, above, label="Above permissible")
+        ax.bar(x, between, bottom=above, label="Between acceptable & permissible")
+        ax.bar(x, missing, bottom=above + between, label=DATA_NOT_AVAILABLE)
+        ax.set_xticks(x)
+        ax.set_xticklabels(comp_df["Location"].astype(str), rotation=35, ha="right", fontsize=8)
+        ax.set_ylabel("Number of parameters")
+        ax.set_title("Compliance and missing-data count by sample")
+        ax.legend(fontsize=8)
+        ax.grid(axis="y", alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _add_image(story, path, width=6.8 * inch):
+    try:
+        img = Image(path)
+        ratio = img.imageHeight / float(img.imageWidth)
+        img.drawWidth = width
+        img.drawHeight = width * ratio
+        story.append(img)
+        story.append(Spacer(1, 0.12 * inch))
+    except Exception:
+        pass
+
+
+def _parameter_explanation(df, parameter, acceptable, permissible):
+    values = df[parameter].dropna()
+    missing_n = int(df[parameter].isna().sum())
+    if values.empty:
+        return f"For {parameter}, no numeric observations are available in the selected dataset. All available locations are therefore shown as {DATA_NOT_AVAILABLE} and excluded from numeric statistics."
+
+    mean_v = values.mean()
+    min_v = values.min()
+    max_v = values.max()
+    status_counts = df[parameter].apply(lambda x: status_from_limits(x, acceptable, permissible)).value_counts().to_dict()
+    above = int(status_counts.get("Above permissible", 0))
+    between = int(status_counts.get("Between acceptable & permissible", 0))
+    acceptable_count = int(status_counts.get("Acceptable", 0))
+    return (
+        f"For {parameter}, the observed values range from {min_v:.3f} to {max_v:.3f}, "
+        f"with a mean concentration of {mean_v:.3f}. In the selected dataset, {acceptable_count} samples are within the acceptable limit, "
+        f"{between} samples fall between acceptable and permissible limits, and {above} samples are above the permissible limit. "
+        f"Missing observations for this parameter: {missing_n}. Missing values are not treated as zero."
+    )
+
+
+def generate_project_report_pdf(df, selected_params, limit_table, data_source_label, loc_col, numeric_cols):
+    """Create a downloadable PDF project report from the current dashboard state."""
+    if loc_col is None:
+        report_df = df.copy()
+        report_df["Location"] = report_df.index.astype(str)
+        loc_col_use = "Location"
+    else:
+        report_df = df.copy()
+        loc_col_use = loc_col
+
+    pdf_buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        pdf_buffer,
+        pagesize=A4,
+        rightMargin=34,
+        leftMargin=34,
+        topMargin=34,
+        bottomMargin=30,
+        title="Water Quality Analysis Project Report",
+        author="Dr Sachchidanand Singh",
+    )
+
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(name="CenterTitle", parent=styles["Title"], alignment=1, textColor=colors.HexColor("#075985")))
+    styles.add(ParagraphStyle(name="SmallMuted", parent=styles["Normal"], fontSize=8, textColor=colors.HexColor("#64748B"), leading=10))
+    styles.add(ParagraphStyle(name="Section", parent=styles["Heading2"], textColor=colors.HexColor("#0F766E"), spaceBefore=10, spaceAfter=6))
+    styles.add(ParagraphStyle(name="Body", parent=styles["BodyText"], fontSize=9.5, leading=13, spaceAfter=6))
+
+    story = []
+    story.append(Paragraph("Water Quality Analysis Project Report", styles["CenterTitle"]))
+    story.append(Paragraph(DEVELOPER_TEXT, styles["SmallMuted"]))
+    story.append(Spacer(1, 0.16 * inch))
+    story.append(
+        Paragraph(
+            f"Generated on: {datetime.now().strftime('%d %B %Y, %I:%M %p')}<br/>Data source: {_pdf_cell(data_source_label, 90)}",
+            styles["SmallMuted"],
+        )
+    )
+    story.append(Spacer(1, 0.15 * inch))
+    story.append(
+        Paragraph(
+            "This project report summarizes the uploaded water-quality dataset through data screening, missing-value assessment, "
+            "parameter-wise statistics, spatial distribution plots, correlation analysis and drinking-water compliance screening. "
+            f"Blank values are reported as {DATA_NOT_AVAILABLE} and are excluded from numeric calculations rather than being treated as zero.",
+            styles["Body"],
+        )
+    )
+
+    mapped_n = int(report_df[["Longitude", "Latitude"]].dropna().shape[0]) if {"Longitude", "Latitude"}.issubset(report_df.columns) else 0
+    total_missing = int(report_df[selected_params].isna().sum().sum()) if selected_params else 0
+    comp = build_compliance(report_df, selected_params, limit_table) if selected_params else pd.DataFrame()
+    above_samples = int((comp["Above permissible"] > 0).sum()) if not comp.empty else 0
+
+    kpi_data = [
+        ["Indicator", "Value"],
+        ["Number of samples", str(len(report_df))],
+        ["Mapped samples", str(mapped_n)],
+        ["Selected parameters", str(len(selected_params))],
+        [f"Total {DATA_NOT_AVAILABLE} cells", str(total_missing)],
+        ["Samples with at least one above-permissible parameter", str(above_samples)],
+    ]
+    story.append(_pdf_table(kpi_data, col_widths=[3.8 * inch, 2.1 * inch], font_size=8.2))
+
+    story.append(Paragraph("1. Dataset overview", styles["Section"]))
+    preview_cols = [c for c in ["Sample ID", loc_col_use, "Longitude", "Latitude"] if c in report_df.columns]
+    if preview_cols:
+        preview = make_display_df(report_df[preview_cols]).head(12)
+        table_data = [preview.columns.tolist()] + [[_pdf_cell(v, 32) for v in row] for row in preview.values.tolist()]
+        story.append(_pdf_table(table_data, font_size=7.0))
+        story.append(Spacer(1, 0.08 * inch))
+    story.append(
+        Paragraph(
+            "The dataset has been standardized by converting blank strings and common missing-value tokens such as NA, N/A, NIL and dashes "
+            f"to missing numeric values. In all exported display tables these values are written as {DATA_NOT_AVAILABLE}.",
+            styles["Body"],
+        )
+    )
+
+    if selected_params:
+        story.append(Paragraph("2. Parameter-wise statistical summary", styles["Section"]))
+        summary_rows = [["Parameter", "Unit", "Count", "Missing", "Min", "Mean", "Median", "Max"]]
+        for param in selected_params:
+            values = report_df[param].dropna()
+            unit_row = limit_table[limit_table["Parameter"] == param]
+            unit = unit_row["Unit"].iloc[0] if not unit_row.empty else ""
+            if values.empty:
+                summary_rows.append([param, unit, "0", str(int(report_df[param].isna().sum())), "NA", "NA", "NA", "NA"])
+            else:
+                summary_rows.append([
+                    param,
+                    unit,
+                    str(int(values.count())),
+                    str(int(report_df[param].isna().sum())),
+                    f"{values.min():.3f}",
+                    f"{values.mean():.3f}",
+                    f"{values.median():.3f}",
+                    f"{values.max():.3f}",
+                ])
+        story.append(_pdf_table(summary_rows, font_size=6.8))
+        story.append(Spacer(1, 0.12 * inch))
+
+        missing_rows = [["Parameter", "Available", DATA_NOT_AVAILABLE, "Missing (%)"]]
+        for param in selected_params:
+            missing = int(report_df[param].isna().sum())
+            available = int(report_df[param].notna().sum())
+            pct = (missing / len(report_df) * 100) if len(report_df) else 0
+            missing_rows.append([param, str(available), str(missing), f"{pct:.1f}"])
+        story.append(Paragraph("Missing-data summary", styles["Heading3"]))
+        story.append(_pdf_table(missing_rows, col_widths=[2.5 * inch, 1.1 * inch, 1.5 * inch, 1.1 * inch], font_size=7.2))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            story.append(PageBreak())
+            story.append(Paragraph("3. Parameter-wise visual analysis and interpretation", styles["Section"]))
+            for i, param in enumerate(selected_params, 1):
+                acceptable, permissible = limit_for_column(param, limit_table)
+                unit_row = limit_table[limit_table["Parameter"] == param]
+                unit = unit_row["Unit"].iloc[0] if not unit_row.empty else ""
+                story.append(Paragraph(f"3.{i} {param}", styles["Heading3"]))
+                story.append(Paragraph(_parameter_explanation(report_df, param, acceptable, permissible), styles["Body"]))
+
+                bar_path = f"{tmpdir}/{i}_{param}_bar.png".replace("/", "/")
+                hist_path = f"{tmpdir}/{i}_{param}_hist.png".replace("/", "/")
+                map_path = f"{tmpdir}/{i}_{param}_spatial.png".replace("/", "/")
+                _save_bar_chart(report_df, param, loc_col_use, acceptable, permissible, unit, bar_path)
+                _add_image(story, bar_path, width=6.9 * inch)
+                _save_histogram(report_df, param, unit, hist_path)
+                _add_image(story, hist_path, width=5.9 * inch)
+                _save_spatial_chart(report_df, param, loc_col_use, map_path)
+                _add_image(story, map_path, width=5.9 * inch)
+                if i != len(selected_params):
+                    story.append(Spacer(1, 0.08 * inch))
+
+            story.append(PageBreak())
+            story.append(Paragraph("4. Correlation analysis", styles["Section"]))
+            corr_cols = [c for c in selected_params if report_df[c].notna().sum() >= 2]
+            if len(corr_cols) >= 2:
+                corr_path = f"{tmpdir}/correlation_heatmap.png"
+                _save_correlation_heatmap(report_df, corr_cols, corr_path)
+                story.append(
+                    Paragraph(
+                        "The correlation matrix provides an exploratory view of pairwise linear relationships among parameters. "
+                        "Correlations should be interpreted carefully because missing values and small sample sizes can affect stability.",
+                        styles["Body"],
+                    )
+                )
+                _add_image(story, corr_path, width=6.6 * inch)
+            else:
+                story.append(Paragraph("Correlation analysis requires at least two parameters with two or more numeric observations.", styles["Body"]))
+
+            story.append(Paragraph("5. Compliance screening", styles["Section"]))
+            comp = build_compliance(report_df, selected_params, limit_table).sort_values("Exceedance Score", ascending=False)
+            comp_rows = [["Sample", "Location", "Acceptable", "Between", "Above", DATA_NOT_AVAILABLE, "Score"]]
+            for _, row in comp.iterrows():
+                comp_rows.append([
+                    _pdf_cell(row.get("Sample ID", ""), 18),
+                    _pdf_cell(row.get("Location", ""), 28),
+                    str(int(row["Acceptable"])),
+                    str(int(row["Between acceptable & permissible"])),
+                    str(int(row["Above permissible"])),
+                    str(int(row[DATA_NOT_AVAILABLE])),
+                    str(int(row["Exceedance Score"])),
+                ])
+            story.append(
+                Paragraph(
+                    "Compliance status is calculated using the editable limit table used in the dashboard. "
+                    "The exceedance score gives higher weight to above-permissible observations and is useful for prioritizing locations for detailed review.",
+                    styles["Body"],
+                )
+            )
+            story.append(_pdf_table(comp_rows, font_size=6.6))
+            comp_path = f"{tmpdir}/compliance_chart.png"
+            _save_compliance_chart(comp, comp_path)
+            _add_image(story, comp_path, width=6.7 * inch)
+
+            story.append(Paragraph("6. Interpretive summary", styles["Section"]))
+            if not comp.empty:
+                highest = comp.iloc[0]
+                story.append(
+                    Paragraph(
+                        f"Based on the selected parameters, the highest screening priority is observed for {_pdf_cell(highest.get('Location', ''), 60)} "
+                        f"with an exceedance score of {int(highest['Exceedance Score'])}. "
+                        "Locations with above-permissible observations should be verified using laboratory QA/QC records, repeat sampling and relevant local hydrogeological information. "
+                        f"Cells marked as {DATA_NOT_AVAILABLE} indicate that the parameter was not available and should not be interpreted as absence of contamination.",
+                        styles["Body"],
+                    )
+                )
+            story.append(
+                Paragraph(
+                    "This report is intended for exploratory assessment and decision support. Final conclusions should use the latest notified standards, "
+                    "field observations, laboratory uncertainty information and repeat measurements wherever required.",
+                    styles["Body"],
+                )
+            )
+    else:
+        story.append(Paragraph("No parameters were selected for detailed report generation.", styles["Body"]))
+
+    def _footer(canvas, doc_obj):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(colors.HexColor("#64748B"))
+        canvas.drawString(34, 18, DEVELOPER_TEXT)
+        canvas.drawRightString(A4[0] - 34, 18, f"Page {doc_obj.page}")
+        canvas.restoreState()
+
+    doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
+    pdf_buffer.seek(0)
+    return pdf_buffer.getvalue()
 
 
 def load_uploaded_file(uploaded_file):
@@ -966,5 +1380,39 @@ with tab6:
         file_name="water_quality_limits.csv",
         mime="text/csv"
     )
+
+    st.markdown("---")
+    st.subheader("Export complete project report as PDF")
+    st.caption(
+        "The PDF report includes an executive overview, data summary, missing-data assessment, "
+        "parameter-wise charts, printable spatial plots, correlation heatmap, compliance screening and explanatory interpretation."
+    )
+
+    if not selected_params:
+        st.info("Please select at least one parameter from the sidebar to generate the PDF project report.")
+    else:
+        if st.button("📄 Prepare PDF Project Report", type="primary", use_container_width=True):
+            with st.spinner("Preparing the PDF project report..."):
+                try:
+                    st.session_state["project_report_pdf"] = generate_project_report_pdf(
+                        df=df,
+                        selected_params=selected_params,
+                        limit_table=limit_table,
+                        data_source_label=data_source_label,
+                        loc_col=loc_col,
+                        numeric_cols=numeric_cols,
+                    )
+                    st.success("PDF project report is ready. Click the download button below.")
+                except Exception as exc:
+                    st.error(f"Could not generate PDF report: {exc}")
+
+        if "project_report_pdf" in st.session_state:
+            st.download_button(
+                "⬇️ Download Complete Project Report as PDF",
+                data=st.session_state["project_report_pdf"],
+                file_name="water_quality_project_report.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
 
 render_footer()
