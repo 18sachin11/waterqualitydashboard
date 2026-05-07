@@ -6,7 +6,17 @@ import io
 import tempfile
 from datetime import datetime
 
-import matplotlib.pyplot as plt
+
+# Matplotlib is optional at import time so the web app does not crash
+# if Streamlit Cloud has not yet installed all dependencies.
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    MATPLOTLIB_AVAILABLE = True
+except Exception:
+    plt = None
+    MATPLOTLIB_AVAILABLE = False
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -462,6 +472,123 @@ def make_map_figure(map_df, map_param, loc_col_use):
 
 
 
+def idw_interpolation_grid(map_df, parameter, grid_size=90, power=2.0, padding_fraction=0.06):
+    """Create an inverse distance weighted interpolation grid using Longitude/Latitude.
+
+    This avoids heavy geospatial dependencies and works well for small water-quality
+    monitoring datasets. The output is for exploratory visualization only.
+    """
+    required = ["Longitude", "Latitude", parameter]
+    valid = map_df.dropna(subset=required).copy()
+    if len(valid) < 3:
+        return None, "At least three numeric sample locations are required for IDW interpolation."
+
+    x = valid["Longitude"].astype(float).to_numpy()
+    y = valid["Latitude"].astype(float).to_numpy()
+    z = valid[parameter].astype(float).to_numpy()
+
+    if np.isclose(x.max(), x.min()) or np.isclose(y.max(), y.min()):
+        return None, "Interpolation cannot be generated because sample coordinates have insufficient spatial spread."
+
+    x_pad = max((x.max() - x.min()) * padding_fraction, 0.001)
+    y_pad = max((y.max() - y.min()) * padding_fraction, 0.001)
+    xi = np.linspace(x.min() - x_pad, x.max() + x_pad, int(grid_size))
+    yi = np.linspace(y.min() - y_pad, y.max() + y_pad, int(grid_size))
+    xx, yy = np.meshgrid(xi, yi)
+
+    gx = xx.ravel()[:, None]
+    gy = yy.ravel()[:, None]
+    dist = np.sqrt((gx - x[None, :]) ** 2 + (gy - y[None, :]) ** 2)
+
+    exact = dist < 1e-12
+    weights = 1.0 / np.maximum(dist, 1e-12) ** float(power)
+    zi = (weights @ z) / weights.sum(axis=1)
+
+    if exact.any():
+        exact_rows = np.where(exact.any(axis=1))[0]
+        exact_cols = exact[exact_rows].argmax(axis=1)
+        zi[exact_rows] = z[exact_cols]
+
+    zz = zi.reshape(xx.shape)
+    return (xi, yi, zz, valid), None
+
+
+def make_interpolation_figure(map_df, parameter, loc_col_use, grid_size=90, power=2.0):
+    result, message = idw_interpolation_grid(map_df, parameter, grid_size=grid_size, power=power)
+    if message:
+        return None, message
+
+    xi, yi, zz, valid = result
+    missing = map_df[map_df[parameter].isna()].copy()
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Contour(
+            x=xi,
+            y=yi,
+            z=zz,
+            contours=dict(coloring="heatmap"),
+            colorbar=dict(title=parameter),
+            hovertemplate=(
+                "Longitude: %{x:.4f}<br>"
+                "Latitude: %{y:.4f}<br>"
+                f"Interpolated {parameter}: %{{z:.3f}}<extra></extra>"
+            ),
+            name=f"Interpolated {parameter}",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=valid["Longitude"],
+            y=valid["Latitude"],
+            mode="markers+text",
+            text=valid[loc_col_use].astype(str).str.slice(0, 18),
+            textposition="top center",
+            marker=dict(size=10, color="black", symbol="circle-open", line=dict(width=2)),
+            customdata=np.stack([
+                valid[loc_col_use].astype(str),
+                valid[parameter].round(3).astype(str),
+            ], axis=-1),
+            hovertemplate=(
+                "<b>%{customdata[0]}</b><br>"
+                "Observed value: %{customdata[1]}<br>"
+                "Longitude: %{x:.4f}<br>Latitude: %{y:.4f}<extra></extra>"
+            ),
+            name="Observed samples",
+        )
+    )
+    if not missing.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=missing["Longitude"],
+                y=missing["Latitude"],
+                mode="markers+text",
+                text=missing[loc_col_use].astype(str).str.slice(0, 18),
+                textposition="bottom center",
+                marker=dict(size=10, color="lightgray", symbol="x"),
+                customdata=missing[loc_col_use].astype(str),
+                hovertemplate=(
+                    "<b>%{customdata}</b><br>"
+                    f"{parameter}: " + DATA_NOT_AVAILABLE +
+                    "<br>Longitude: %{x:.4f}<br>Latitude: %{y:.4f}<extra></extra>"
+                ),
+                name=DATA_NOT_AVAILABLE,
+            )
+        )
+
+    fig.update_layout(
+        title=f"IDW interpolated spatial surface for {parameter}",
+        xaxis_title="Longitude",
+        yaxis_title="Latitude",
+        height=660,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(255,255,255,0.92)",
+        legend_title_text="Layer",
+    )
+    fig.update_yaxes(scaleanchor="x", scaleratio=1)
+    return fig, None
+
+
 def _pdf_cell(value, max_chars=42):
     """Return compact text for ReportLab table cells."""
     if pd.isna(value):
@@ -494,6 +621,8 @@ def _pdf_table(data, col_widths=None, font_size=7.2, header_bg="#075985"):
 
 
 def _save_bar_chart(df, parameter, loc_col_use, acceptable, permissible, unit, out_path):
+    if not MATPLOTLIB_AVAILABLE:
+        return
     plot_df = df.copy()
     labels = plot_df[loc_col_use].astype(str).tolist()
     values = plot_df[parameter]
@@ -522,6 +651,8 @@ def _save_bar_chart(df, parameter, loc_col_use, acceptable, permissible, unit, o
 
 
 def _save_histogram(df, parameter, unit, out_path):
+    if not MATPLOTLIB_AVAILABLE:
+        return
     values = df[parameter].dropna()
     fig, ax = plt.subplots(figsize=(7, 3.8))
     if values.empty:
@@ -539,6 +670,8 @@ def _save_histogram(df, parameter, unit, out_path):
 
 
 def _save_spatial_chart(df, parameter, loc_col_use, out_path):
+    if not MATPLOTLIB_AVAILABLE:
+        return
     fig, ax = plt.subplots(figsize=(7.2, 5.2))
     if "Longitude" not in df.columns or "Latitude" not in df.columns:
         ax.text(0.5, 0.5, "Longitude and Latitude columns not available", ha="center", va="center")
@@ -569,7 +702,41 @@ def _save_spatial_chart(df, parameter, loc_col_use, out_path):
     plt.close(fig)
 
 
+
+
+def _save_idw_interpolation_chart(df, parameter, loc_col_use, out_path):
+    if not MATPLOTLIB_AVAILABLE:
+        return
+    if "Longitude" not in df.columns or "Latitude" not in df.columns:
+        return
+    map_df = df.dropna(subset=["Longitude", "Latitude"]).copy()
+    result, message = idw_interpolation_grid(map_df, parameter, grid_size=90, power=2.0)
+    fig, ax = plt.subplots(figsize=(7.2, 5.2))
+    if message:
+        ax.text(0.5, 0.5, message, ha="center", va="center", wrap=True)
+        ax.set_axis_off()
+    else:
+        xi, yi, zz, valid = result
+        cn = ax.contourf(xi, yi, zz, levels=14, alpha=0.85)
+        fig.colorbar(cn, ax=ax, label=f"Interpolated {parameter}")
+        ax.scatter(valid["Longitude"], valid["Latitude"], s=60, facecolors="none", edgecolors="black", label="Observed samples")
+        missing = map_df[map_df[parameter].isna()]
+        if not missing.empty:
+            ax.scatter(missing["Longitude"], missing["Latitude"], marker="x", s=70, label=DATA_NOT_AVAILABLE)
+        for _, row in map_df.iterrows():
+            ax.annotate(str(row[loc_col_use])[:14], (row["Longitude"], row["Latitude"]), fontsize=7, xytext=(3, 3), textcoords="offset points")
+        ax.set_title(f"IDW interpolated surface for {parameter}")
+        ax.set_xlabel("Longitude")
+        ax.set_ylabel("Latitude")
+        ax.grid(alpha=0.25)
+        ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
 def _save_correlation_heatmap(df, corr_cols, out_path):
+    if not MATPLOTLIB_AVAILABLE:
+        return
     corr = df[corr_cols].corr(method="pearson", min_periods=2)
     fig, ax = plt.subplots(figsize=(8.2, 6.2))
     if corr.empty or corr.isna().all().all():
@@ -593,6 +760,8 @@ def _save_correlation_heatmap(df, corr_cols, out_path):
 
 
 def _save_compliance_chart(comp_df, out_path):
+    if not MATPLOTLIB_AVAILABLE:
+        return
     fig, ax = plt.subplots(figsize=(8.8, 4.8))
     if comp_df.empty:
         ax.text(0.5, 0.5, "Compliance summary not available", ha="center", va="center")
@@ -762,6 +931,8 @@ def generate_project_report_pdf(df, selected_params, limit_table, data_source_la
         with tempfile.TemporaryDirectory() as tmpdir:
             story.append(PageBreak())
             story.append(Paragraph("3. Parameter-wise visual analysis and interpretation", styles["Section"]))
+            if not MATPLOTLIB_AVAILABLE:
+                story.append(Paragraph("Static chart images could not be added because matplotlib is not installed in the app environment. The textual statistics, data screening and compliance tables are still included in this PDF. Add matplotlib to requirements.txt and redeploy to enable chart images in exported reports.", styles["Body"]))
             for i, param in enumerate(selected_params, 1):
                 acceptable, permissible = limit_for_column(param, limit_table)
                 unit_row = limit_table[limit_table["Parameter"] == param]
@@ -778,6 +949,9 @@ def generate_project_report_pdf(df, selected_params, limit_table, data_source_la
                 _add_image(story, hist_path, width=5.9 * inch)
                 _save_spatial_chart(report_df, param, loc_col_use, map_path)
                 _add_image(story, map_path, width=5.9 * inch)
+                idw_path = f"{tmpdir}/{i}_{param}_idw_interpolation.png".replace("/", "/")
+                _save_idw_interpolation_chart(report_df, param, loc_col_use, idw_path)
+                _add_image(story, idw_path, width=5.9 * inch)
                 if i != len(selected_params):
                     story.append(Spacer(1, 0.08 * inch))
 
@@ -897,7 +1071,7 @@ def render_landing_cards():
             """
             <div class="info-card">
                 <h4>🗺️ Spatial mapping</h4>
-                <p>Interactive online maps using longitude and latitude. Missing values are shown as grey points.</p>
+                <p>Interactive point maps and IDW interpolated surfaces using longitude and latitude. Missing values are shown as grey points.</p>
             </div>
             """,
             unsafe_allow_html=True
@@ -1053,6 +1227,8 @@ st.sidebar.markdown("# 💧 Dashboard Controls")
 st.sidebar.markdown(DEVELOPER_TEXT)
 st.sidebar.markdown("---")
 st.sidebar.success(f"Report generated for: {data_source_label}")
+if not MATPLOTLIB_AVAILABLE:
+    st.sidebar.warning("matplotlib is not installed. Dashboard charts will work, but PDF chart images will be skipped until dependencies are installed.")
 
 with st.sidebar.expander("Filter samples", expanded=True):
     if loc_col:
@@ -1239,13 +1415,37 @@ with tab3:
             else:
                 loc_col_use = loc_col
 
-            fig_map = make_map_figure(map_df, map_param, loc_col_use)
-            st.plotly_chart(fig_map, use_container_width=True)
-
-            st.caption(
-                f"Grey markers indicate samples where {map_param} is {DATA_NOT_AVAILABLE}. "
-                "These locations are still mapped so every parameter can be visualized spatially."
+            view_mode = st.radio(
+                "Spatial visualization type",
+                ["Point-based online map", "Interpolated surface map (IDW)"],
+                horizontal=True,
+                help="Point maps show measured samples on an online basemap. IDW interpolation creates an exploratory continuous surface from available numeric values."
             )
+
+            if view_mode == "Point-based online map":
+                fig_map = make_map_figure(map_df, map_param, loc_col_use)
+                st.plotly_chart(fig_map, use_container_width=True)
+                st.caption(
+                    f"Grey markers indicate samples where {map_param} is {DATA_NOT_AVAILABLE}. "
+                    "These locations are still mapped so every parameter can be visualized spatially."
+                )
+            else:
+                interp_c1, interp_c2 = st.columns(2)
+                with interp_c1:
+                    grid_size = st.slider("Interpolation grid resolution", 40, 160, 90, 10)
+                with interp_c2:
+                    idw_power = st.slider("IDW power", 1.0, 4.0, 2.0, 0.5)
+                fig_interp, interp_msg = make_interpolation_figure(
+                    map_df, map_param, loc_col_use, grid_size=grid_size, power=idw_power
+                )
+                if interp_msg:
+                    st.info(interp_msg)
+                else:
+                    st.plotly_chart(fig_interp, use_container_width=True)
+                    st.caption(
+                        "This interpolated map is generated using inverse distance weighting (IDW). "
+                        "It is useful for exploratory visualization, but it should not be interpreted as a final geostatistical surface or regulatory map without field validation and adequate sampling density."
+                    )
 
             missing_map_df = map_df[pd.isna(map_df[map_param])]
             if not missing_map_df.empty:
@@ -1385,7 +1585,7 @@ with tab6:
     st.subheader("Export complete project report as PDF")
     st.caption(
         "The PDF report includes an executive overview, data summary, missing-data assessment, "
-        "parameter-wise charts, printable spatial plots, correlation heatmap, compliance screening and explanatory interpretation."
+        "parameter-wise charts, printable spatial plots, correlation heatmap, compliance screening and explanatory interpretation. Interpolated surfaces are shown interactively in the dashboard and should be interpreted as exploratory IDW outputs."
     )
 
     if not selected_params:
